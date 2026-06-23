@@ -1,0 +1,15 @@
+services:
+  web-chunker:
+    image: downloads.unstructured.io/unstructured-io/unstructured:latest
+    container_name: newspaper-chunker
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./web_chunker.py:/app/web_chunker.py
+      - ./raw:/app/raw
+      - ./Documents:/app/Documents
+    working_dir: /app
+    command: python web_chunker.py
+    environment:
+      - PORT=5000
+    restart: unless-stopped

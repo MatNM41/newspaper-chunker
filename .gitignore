@@ -1,47 +1,19 @@
 ﻿# Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-*.whl
 
-# Виртуальное окружение
-venv/
-env/
+# Данные
+raw/*
+Documents/*
+
+# Docker
 .env
-.venv
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
-# Данные (НЕ загружаем газеты и результаты)
-raw/*
-Documents/*
-*.pdf
-*.doc
-*.docx
-*.txt
-
-# Логи
-*.log
-*.tmp
-
-# Системные файлы
+# Системные
 Thumbs.db
 .DS_Store
-desktop.ini
-
-# Конфиденциальные данные
-*.env
-*.secret
-config.local.py
+*.log
