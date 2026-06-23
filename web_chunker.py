@@ -9,11 +9,22 @@ from collections import OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =====================================================================
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ (автоматические пути)
 # =====================================================================
+BASE_DIR = Path(__file__).parent.absolute()
+RAW_DIR = BASE_DIR / 'raw'
+OUTPUT_DIR = BASE_DIR / 'Documents'
+TEMP_DIR = Path(tempfile.gettempdir()) / 'newspaper_chunker'
+
+# Создаём папки автоматически
+RAW_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+TEMP_DIR.mkdir(exist_ok=True)
+
 SUPPORTED_EXTENSIONS = {'.pdf', '.txt', '.rtf', '.doc', '.docx'}
-TEMP_DIR = os.path.join(tempfile.gettempdir(), 'newspaper_chunker')
-os.makedirs(TEMP_DIR, exist_ok=True)
+
+print(f"RAW_DIR: {RAW_DIR}")
+print(f"OUTPUT_DIR: {OUTPUT_DIR}")
 
 # =====================================================================
 # ИЗВЛЕЧЕНИЕ ТЕКСТА
@@ -223,7 +234,45 @@ def process_text_to_chunks(text):
 
 
 # =====================================================================
-# HTML (компактный)
+# СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+# =====================================================================
+
+def save_chunks_to_files(chunks, original_filename):
+    """Сохраняет чанки в JSON и TXT в папку Documents"""
+    base_name = Path(original_filename).stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    json_file = OUTPUT_DIR / f"{base_name}_{timestamp}.json"
+    txt_file = OUTPUT_DIR / f"{base_name}_{timestamp}.txt"
+    
+    json_data = {
+        'name': original_filename,
+        'date': datetime.now().isoformat(),
+        'chunks_count': len(chunks),
+        'total_elements': sum(c['elements_count'] for c in chunks),
+        'chunks': chunks
+    }
+    
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, ensure_ascii=False, indent=2)
+    
+    with open(txt_file, 'w', encoding='utf-8') as f:
+        f.write(f"Файл: {original_filename}\n")
+        f.write(f"Дата: {datetime.now().isoformat()}\n")
+        f.write(f"Чанков: {len(chunks)}\n")
+        f.write("="*70 + "\n\n")
+        for chunk in chunks:
+            f.write(f"ЧАНК {chunk['id']}\n")
+            f.write(f"Тема: {chunk['theme']}\n")
+            f.write(f"Текст: {chunk['content']}\n")
+            f.write(f"Элементы: {', '.join(chunk['elements'][:20])}\n")
+            f.write("="*70 + "\n\n")
+    
+    return json_file, txt_file
+
+
+# =====================================================================
+# HTML
 # =====================================================================
 
 def get_html():
@@ -374,16 +423,16 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                 total_chunks = total_elements = 0
                 
                 for filename, file_content in files_data:
-                    temp_path = os.path.join(TEMP_DIR, filename)
+                    temp_path = TEMP_DIR / filename
                     with open(temp_path, 'wb') as f:
                         f.write(file_content)
                     
                     try:
                         ext = os.path.splitext(filename)[1].lower()
                         if ext == '.pdf':
-                            text = extract_text_with_unstructured(temp_path)
+                            text = extract_text_with_unstructured(str(temp_path))
                         elif ext in ['.txt', '.rtf']:
-                            text = extract_text_txt(temp_path)
+                            text = extract_text_txt(str(temp_path))
                         else:
                             continue
                         
@@ -396,9 +445,12 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                             }
                             total_chunks += len(chunks)
                             total_elements += sum(c['elements_count'] for c in chunks)
+                            
+                            # Сохраняем в Documents
+                            save_chunks_to_files(chunks, filename)
                     finally:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
+                        if temp_path.exists():
+                            temp_path.unlink()
                 
                 self.send_json({
                     'files_received': len(files_data),
@@ -425,7 +477,15 @@ class ChunkerHandler(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ.get('PORT', 5000))
-    print(f"Сервер запущен: http://0.0.0.0:{port}")
+    print("=" * 60)
+    print("  ГАЗЕТНЫЙ ЧАНКЕР — ВЕБ-ИНТЕРФЕЙС")
+    print("=" * 60)
+    print(f"  Сервер: http://0.0.0.0:{port}")
+    print(f"  Папка с газетами: {RAW_DIR}")
+    print(f"  Папка результатов: {OUTPUT_DIR}")
+    print("  Ctrl+C для остановки")
+    print("=" * 60)
+    
     server = HTTPServer(('0.0.0.0', port), ChunkerHandler)
     try:
         server.serve_forever()
