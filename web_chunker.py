@@ -1,48 +1,44 @@
 import os
 import json
-import subprocess
 import re
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from collections import OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =====================================================================
-# КОНФИГУРАЦИЯ (автоматические пути)
+# КОНФИГУРАЦИЯ
 # =====================================================================
 BASE_DIR = Path(__file__).parent.absolute()
 RAW_DIR = BASE_DIR / 'raw'
 OUTPUT_DIR = BASE_DIR / 'Documents'
 TEMP_DIR = Path(tempfile.gettempdir()) / 'newspaper_chunker'
 
-# Создаём папки автоматически
 RAW_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 SUPPORTED_EXTENSIONS = {'.pdf', '.txt', '.rtf', '.doc', '.docx'}
 
-print(f"RAW_DIR: {RAW_DIR}")
-print(f"OUTPUT_DIR: {OUTPUT_DIR}")
-
 # =====================================================================
 # ИЗВЛЕЧЕНИЕ ТЕКСТА
 # =====================================================================
 
 def extract_text_with_unstructured(input_path):
-    """Извлекает текст через Unstructured (как библиотека)"""
+    """Извлекает ВЕСЬ текст через Unstructured"""
     try:
         from unstructured.partition.auto import partition
         
         print(f"Извлечение текста из: {os.path.basename(input_path)}")
         elements = partition(filename=input_path, strategy="auto", languages=["rus"])
         
-        text_parts = []
+        all_text = []
         for el in elements:
-            text_parts.append(str(el))
+            text = str(el).strip()
+            if text:
+                all_text.append(text)
         
-        full_text = "\n".join(text_parts)
+        full_text = '\n'.join(all_text)
         print(f"✓ Извлечено {len(full_text)} символов")
         return full_text
         
@@ -69,210 +65,160 @@ def extract_text_txt(file_path):
 
 
 # =====================================================================
-# АЛГОРИТМ ЧАНКИНГА
+# НОВЫЙ АЛГОРИТМ: ВЕСЬ ТЕКСТ, МИНИМУМ РАЗБИЕНИЙ
 # =====================================================================
 
-def extract_meaningful_phrases(text):
-    """Извлекает значимые фразы (10 категорий)"""
-    elements = set()
-    
-    # 1. ДАТЫ
-    date_patterns = [
-        r'\d{1,2}\s+(?:январ[ья]|феврал[ья]|март[а]?|апрел[ья]|ма[йя]|июн[ья]|июл[ья]|август[а]?|сентябр[ья]|октябр[ья]|ноябр[ья]|декабр[ья])\s+\d{4}\s*(?:год[а]?|г\.)?',
-        r'\b\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})\b',
-        r'(?:\()?\d{4}(?:\))?\s*(?:год[а]?|г\.|гг\.)?',
-        r'\d{4}\s*[–\-]\s*\d{4}',
-        r'\b\d{2,4}\s*[-–]\s*[ея]+\s*(?:год[аы]?)?',
-        r'(?:XX|XIX|XVIII|XXI)?\s*\d{1,2}[-й]*\s*(?:век[а]?|столети[ея])',
-        r'с\s+\d{1,2}\s+по\s+\d{1,2}\s+(?:январ[ья]|феврал[ья]|март[а]?|апрел[ья]|ма[йя]|июн[ья]|июл[ья]|август[а]?|сентябр[ья]|октябр[ья]|ноябр[ья]|декабр[ья])',
-        r'(?:Новый\s+год|Рождество|Пасх[аи]|День\s+Побед[аы]|9\s+мая|23\s+февраля|8\s+марта|1\s+мая|4\s+ноября|12\s+июня)',
-        r'\d+[-]?(?:лети[еюя]|летн[яяийего]|годовой|годовщин[аы]|й\s+год)',
-        r'(?:весн[аы]|лет[ао]|осен[ьи]|зим[аы])\s+\d{4}',
-        r'\d{1,2}[:.]\d{2}',
-    ]
-    for p in date_patterns:
-        for m in re.findall(p, text, re.IGNORECASE):
-            m = m.strip()
-            if m.lower() not in ['год', 'г.', 'г', 'лет', 'дня', 'для', 'или', 'ещё', 'уже', 'это', 'как', 'что']:
-                m = re.sub(r'[()]', '', m).strip()
-                if 3 <= len(m) <= 80:
-                    elements.add(m)
-    
-    # 2. ИМЕНА
-    for m in re.findall(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?', text):
-        if len(m.split()) <= 3 and not re.search(r'(?:Сегодня|Завтра|Вчера|Как|Что|Это|Для|Или|Уже|Ещё)', m):
-            elements.add(m.strip())
-    
-    # 3. ОРГАНИЗАЦИИ
-    for p in [
-        r'[«"][^«»"]{3,}[»"]',
-        r'(?:ООО|ЗАО|ОАО|ПАО|НКО|АО|ИП)\s*[«"][^«»"]+[»"]?',
-        r'(?:Правительство|Администрация|Министерство|Госсовет|Госдума)\s+(?:России|Удмуртии|РФ|города|района)?',
-        r'ГКЧП|СНГ|ООН|НАТО|ЕС|БРИКС|КПСС|СССР',
-    ]:
-        for m in re.findall(p, text, re.IGNORECASE):
-            if len(m.strip()) > 3:
-                elements.add(m.strip())
-    
-    # 4. ГЕОГРАФИЯ
-    for p in [
-        r'г\.\s*[А-ЯЁ][а-яё]+', r'ул\.\s*[А-ЯЁ][а-яё]+',
-        r'Советский\s+Союз|Российская\s+Федераци[яи]|Росси[яи]',
-        r'Удмурт(?:и[яи]|ской|ия)|Ижевск[аеу]?|Москв[аые]',
-    ]:
-        for m in re.findall(p, text, re.IGNORECASE):
-            if len(m.strip()) > 3:
-                elements.add(m.strip())
-    
-    # 5-10. ОСТАЛЬНЫЕ КАТЕГОРИИ
-    for p in [
-        r'Ирония\s+судьбы|Джентльмены\s+удачи|Высоцк[а-яё]+|Гагарин[а]?',
-        r'калачик\s+за\s+\d+\s+копеек|талоны\s+на\s+(?:масло|водку)|железный\s+занавес|холодная\s+война',
-        r'Великая\s+Побед[аы]|дружб[аы]\s+народов|мир\s*[-–]\s*труд\s*[-–]\s*май',
-        r'\d+[\s]*(?:миллион|миллиард|тысяч|процент|рубл[еяй]|млрд|млн)',
-        r'бюджет|строительство|ремонт|выбор[аы]|СВО|спецопераци[яи]|юбилей|фестиваль|ярмарка',
-    ]:
-        for m in re.findall(p, text, re.IGNORECASE):
-            if len(m.strip()) > 3:
-                elements.add(m.strip())
-    
-    # ФИЛЬТРАЦИЯ
-    final = []
-    for elem in sorted(list(elements), key=len, reverse=True):
-        if re.match(r'^[\d\s.,;:!?\-()]+$', elem):
-            continue
-        if elem.lower() in ['год', 'г.', 'г', 'лет', 'дня', 'для', 'или', 'ещё', 'уже']:
-            continue
-        if not any(elem.lower() in e.lower() and len(elem) < len(e) for e in final):
-            final.append(elem)
-    
-    return final
-
-
-def group_text_by_articles(text):
-    """Группирует текст по статьям"""
-    lines = text.split('\n')
-    titles = []
-    
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        if (15 <= len(line) <= 80 and line[0].isupper() 
-            and not line.endswith('.') and len(line.split()) >= 2
-            and not re.match(r'^(www\.|http|\d)', line)):
-            if i + 1 < len(lines) and len(lines[i+1].strip()) > 30:
-                titles.append({'title': line, 'line': i})
-        if line.isupper() and 10 <= len(line) <= 80:
-            titles.append({'title': line, 'line': i})
-    
-    groups = []
-    if not titles:
-        words = ' '.join(lines).split()
-        block, size = [], 0
-        for w in words:
-            block.append(w)
-            size += len(w) + 1
-            if size >= 1000:
-                groups.append({'title': '', 'text': ' '.join(block)})
-                block, size = [], 0
-        if block:
-            groups.append({'title': '', 'text': ' '.join(block)})
-    else:
-        for j, t in enumerate(titles):
-            end = titles[j+1]['line'] if j+1 < len(titles) else len(lines)
-            text_block = ' '.join(l.strip() for l in lines[t['line']:end] if l.strip())
-            if len(text_block) > 30:
-                groups.append({'title': t['title'], 'text': text_block})
-    
-    return groups
-
-
 def clean_text(text):
-    text = re.sub(r'[^\s\wа-яёА-ЯЁa-zA-Z0-9.,!?;:()\-"«»„"№%@#$&*+=/]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+    """Минимальная очистка текста"""
+    # Удаляем номера страниц (одинокие цифры)
+    text = re.sub(r'\n\s*\d{1,3}\s*\n', '\n', text)
+    
+    # Склеиваем слова с переносами
+    text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)
+    
+    # Объединяем одиночные переносы строк внутри абзацев
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    
+    # Убираем множественные пробелы
+    text = re.sub(r'[ \t]+', ' ', text)
+    
+    # Убираем слишком много пустых строк
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
     return text.strip()
 
 
-def create_chunks_from_groups(groups, all_elements):
-    aggregated = OrderedDict()
+def is_major_headline(line):
+    """
+    Определяет ЯВНЫЙ заголовок статьи.
+    Очень строгие критерии — только явные заголовки.
+    """
+    line = line.strip()
     
-    for group in groups:
-        title = group['title'] or (group['text'][:80].rsplit(' ', 1)[0] + '...' if len(group['text']) > 80 else group['text'])
-        text = clean_text(group['text'])
-        group_elements = [e for e in all_elements if e.lower() in text.lower()]
+    if not line or len(line) < 10 or len(line) > 120:
+        return False
+    
+    # Не URL, не номер страницы
+    if re.match(r'^(www\.|http|\d+\s*$)', line):
+        return False
+    
+    # Должен начинаться с заглавной буквы
+    if not line[0].isupper():
+        return False
+    
+    # Минимум 2 слова
+    words = line.split()
+    if len(words) < 2:
+        return False
+    
+    # ЯВНЫЕ признаки заголовка (нужно 2 или более):
+    signals = 0
+    
+    # 1. Весь текст ЗАГЛАВНЫМИ буквами (РУБРИКА)
+    if line.isupper():
+        signals += 3
+    
+    # 2. Каждое слово с заглавной буквы (Title Case)
+    if all(w[0].isupper() for w in words):
+        signals += 2
+    
+    # 3. Заканчивается двоеточием
+    if line.endswith(':'):
+        signals += 2
+    
+    # 4. Очень короткий (менее 40 символов)
+    if len(line) < 40:
+        signals += 1
+    
+    # 5. Содержит числа в начале (как нумерация разделов)
+    if re.match(r'^\d+[\.\)]\s', line):
+        signals += 2
+    
+    # 6. Выделен кавычками
+    if line.startswith('«') and line.endswith('»'):
+        signals += 2
+    
+    return signals >= 3
+
+
+def find_articles(text):
+    """
+    Разбивает текст на крупные статьи.
+    Берёт ВЕСЬ текст, разбивает только по ЯВНЫМ заголовкам.
+    """
+    lines = text.split('\n')
+    
+    # Ищем ТОЛЬКО явные заголовки
+    headlines = []
+    for i, line in enumerate(lines):
+        if is_major_headline(line):
+            headlines.append({
+                'title': line.strip(),
+                'index': i
+            })
+    
+    print(f"  Найдено заголовков: {len(headlines)}")
+    
+    # Если заголовков нет или найден только 1 — весь текст одна статья
+    if len(headlines) <= 1:
+        cleaned = clean_text(text)
+        title = cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in cleaned[:100] else cleaned[:100]
+        return [{'title': title, 'content': cleaned}]
+    
+    # Оставляем заголовки, которые НЕ рядом друг с другом (минимум 5 строк между ними)
+    filtered = [headlines[0]]
+    for h in headlines[1:]:
+        if h['index'] - filtered[-1]['index'] >= 5:
+            filtered.append(h)
+    
+    print(f"  После фильтрации: {len(filtered)} заголовков")
+    
+    # Формируем статьи
+    articles = []
+    
+    for i, headline in enumerate(filtered):
+        start = headline['index']
         
-        if title in aggregated:
-            aggregated[title]['content'] += ' ' + text
-            aggregated[title]['elements'] = sorted(list(set(aggregated[title]['elements']) | set(group_elements)))
+        # Конец статьи — следующий заголовок или конец текста
+        if i + 1 < len(filtered):
+            end = filtered[i + 1]['index']
         else:
-            aggregated[title] = {'content': text, 'elements': group_elements}
+            end = len(lines)
+        
+        # Собираем ВСЕ строки статьи
+        article_lines = []
+        for j in range(start, end):
+            line = lines[j].strip()
+            if line:  # Берём все непустые строки
+                article_lines.append(line)
+        
+        article_text = '\n'.join(article_lines)
+        cleaned = clean_text(article_text)
+        
+        if len(cleaned) > 50:
+            articles.append({
+                'title': headline['title'],
+                'content': cleaned
+            })
     
-    chunks = []
-    for i, (theme, data) in enumerate(aggregated.items(), 1):
-        content = clean_text(data['content'])
-        if len(content) > 500:
-            content = content[:500].rsplit(' ', 1)[0] + '...'
-        chunks.append({
-            'id': i, 'theme': theme[:80], 'content': content,
-            'elements': data['elements'][:30], 'elements_count': len(data['elements'])
-        })
+    # Если остался текст до первого заголовка — добавляем
+    if filtered and filtered[0]['index'] > 0:
+        pre_lines = []
+        for j in range(0, filtered[0]['index']):
+            line = lines[j].strip()
+            if line:
+                pre_lines.append(line)
+        pre_text = '\n'.join(pre_lines)
+        pre_cleaned = clean_text(pre_text)
+        if len(pre_cleaned) > 50:
+            title = pre_cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in pre_cleaned[:100] else pre_cleaned[:100]
+            articles.insert(0, {'title': title, 'content': pre_cleaned})
     
-    return chunks
-
-
-def process_text_to_chunks(text):
-    print(f"Обработка текста ({len(text)} символов)...")
-    all_elements = extract_meaningful_phrases(text)
-    print(f"  Найдено элементов: {len(all_elements)}")
-    groups = group_text_by_articles(text)
-    print(f"  Выделено блоков: {len(groups)}")
-    chunks = create_chunks_from_groups(groups, all_elements)
-    print(f"  Создано чанков: {len(chunks)}")
-    return chunks
-
-
-# =====================================================================
-# СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
-# =====================================================================
-
-def save_chunks_to_files(chunks, original_filename):
-    """Сохраняет чанки в JSON и TXT в папку Documents"""
-    base_name = Path(original_filename).stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    json_file = OUTPUT_DIR / f"{base_name}_{timestamp}.json"
-    txt_file = OUTPUT_DIR / f"{base_name}_{timestamp}.txt"
-    
-    json_data = {
-        'name': original_filename,
-        'date': datetime.now().isoformat(),
-        'chunks_count': len(chunks),
-        'total_elements': sum(c['elements_count'] for c in chunks),
-        'chunks': chunks
-    }
-    
-    with open(json_file, 'w', encoding='utf-8') as f:
-        json.dump(json_data, f, ensure_ascii=False, indent=2)
-    
-    with open(txt_file, 'w', encoding='utf-8') as f:
-        f.write(f"Файл: {original_filename}\n")
-        f.write(f"Дата: {datetime.now().isoformat()}\n")
-        f.write(f"Чанков: {len(chunks)}\n")
-        f.write("="*70 + "\n\n")
-        for chunk in chunks:
-            f.write(f"ЧАНК {chunk['id']}\n")
-            f.write(f"Тема: {chunk['theme']}\n")
-            f.write(f"Текст: {chunk['content']}\n")
-            f.write(f"Элементы: {', '.join(chunk['elements'][:20])}\n")
-            f.write("="*70 + "\n\n")
-    
-    return json_file, txt_file
+    return articles
 
 
 # =====================================================================
-# HTML
+# HTML ИНТЕРФЕЙС
 # =====================================================================
 
 def get_html():
@@ -298,42 +244,50 @@ def get_html():
         .progress{display:none;margin-bottom:20px;padding:10px;background:#e3f2fd;border-radius:4px}
         .results{display:none;margin-top:20px}
         .results-summary{background:#e8f5e9;padding:15px;border-radius:4px;margin-bottom:15px}
-        .chunk{background:#fafafa;border:1px solid #e0e0e0;padding:15px;margin-bottom:10px;border-radius:4px}
-        .chunk-theme{color:#333;font-weight:700;margin-bottom:10px}
-        .chunk-content{color:#555;line-height:1.5;margin-bottom:10px}
-        .chunk-elements{display:flex;flex-wrap:wrap;gap:5px}
-        .element-tag{background:#e3f2fd;color:#1976D2;padding:3px 8px;border-radius:12px;font-size:12px}
+        .article-card{background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;margin-bottom:20px;overflow:hidden}
+        .article-header{background:#1976D2;color:white;padding:15px 20px;font-size:18px;font-weight:bold}
+        .article-body{padding:20px;line-height:1.8;color:#333;text-align:justify;white-space:pre-wrap}
         .tabs{display:flex;gap:10px;margin-bottom:20px;border-bottom:2px solid #e0e0e0;padding-bottom:10px}
         .tab{padding:10px 20px;cursor:pointer;border-radius:4px 4px 0 0;background:#f0f0f0;border:none}
         .tab.active{background:#4CAF50;color:#fff}
-        .tab-content{display:none}.tab-content.active{display:block}
+        .tab-content{display:none}
+        .tab-content.active{display:block}
         pre{background:#f4f4f4;padding:15px;border-radius:4px;font-size:12px;max-height:500px;overflow:auto}
     </style>
 </head>
 <body>
 <div class="container">
     <h1>📰 Газетный чанкер</h1>
+    
     <div class="upload-area" id="dropZone">
-        <p>📁 Перетащите файлы или кликните</p>
+        <p>📁 Перетащите файлы или кликните для выбора</p>
         <p style="color:#999;font-size:14px">PDF, TXT, RTF</p>
         <input type="file" id="fileInput" multiple accept=".pdf,.txt,.rtf">
     </div>
+    
     <div id="fileList"></div>
+    
     <button class="btn-process" id="processBtn" onclick="processFiles()" disabled>⚙️ Обработать</button>
     <button class="btn-clear" onclick="clearFiles()">🗑️ Очистить</button>
+    
     <div class="progress" id="progress"><span id="progressText"></span></div>
+    
     <div class="results" id="results">
         <div class="results-summary" id="resultsSummary"></div>
+        
         <div class="tabs">
-            <button class="tab active" onclick="showTab('chunks')">📄 Чанки</button>
+            <button class="tab active" onclick="showTab('articles')">📄 Статьи</button>
             <button class="tab" onclick="showTab('json')">📋 JSON</button>
         </div>
-        <div class="tab-content active" id="tabChunks"></div>
+        
+        <div class="tab-content active" id="tabArticles"></div>
         <div class="tab-content" id="tabJson"></div>
+        
         <button class="btn-download" onclick="downloadJSON()">📥 JSON</button>
         <button class="btn-download" onclick="downloadTXT()">📥 TXT</button>
     </div>
 </div>
+
 <script>
 let selectedFiles=[],currentResult=null;
 const dz=document.getElementById('dropZone'),fi=document.getElementById('fileInput');
@@ -342,15 +296,31 @@ dz.addEventListener('dragover',e=>{e.preventDefault();dz.style.borderColor='#4CA
 dz.addEventListener('dragleave',()=>{dz.style.borderColor='#ccc'});
 dz.addEventListener('drop',e=>{e.preventDefault();dz.style.borderColor='#ccc';addFiles(e.dataTransfer.files)});
 fi.addEventListener('change',e=>{addFiles(e.target.files)});
-function addFiles(nf){for(let f of nf){const e=f.name.split('.').pop().toLowerCase();if(['pdf','txt','rtf'].includes(e)&&!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))selectedFiles.push(f)}updateFileList()}
-function updateFileList(){const l=document.getElementById('fileList'),b=document.getElementById('processBtn');if(!selectedFiles.length){l.innerHTML='';b.disabled=true;return}l.innerHTML=selectedFiles.map((f,i)=>`<div class="file-item"><span>📄 ${f.name} (${formatSize(f.size)})</span><button class="remove-btn" onclick="removeFile(${i})">✕</button></div>`).join('');b.disabled=false}
+
+function addFiles(nf){
+    for(let f of nf){
+        const e=f.name.split('.').pop().toLowerCase();
+        if(['pdf','txt','rtf'].includes(e)&&!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
+            selectedFiles.push(f)
+    }
+    updateFileList()
+}
+
+function updateFileList(){
+    const l=document.getElementById('fileList'),b=document.getElementById('processBtn');
+    if(!selectedFiles.length){l.innerHTML='';b.disabled=true;return}
+    l.innerHTML=selectedFiles.map((f,i)=>`<div class="file-item"><span>📄 ${f.name} (${formatSize(f.size)})</span><button class="remove-btn" onclick="removeFile(${i})">✕</button></div>`).join('');
+    b.disabled=false
+}
+
 function removeFile(i){selectedFiles.splice(i,1);updateFileList()}
 function clearFiles(){selectedFiles=[];currentResult=null;updateFileList();document.getElementById('results').style.display='none';document.getElementById('progress').style.display='none'}
 function formatSize(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'}
+
 async function processFiles(){
     if(!selectedFiles.length)return;
     const p=document.getElementById('progress'),pt=document.getElementById('progressText'),r=document.getElementById('results');
-    p.style.display='block';r.style.display='none';pt.textContent='⏳ Обработка...';
+    p.style.display='block';r.style.display='none';pt.textContent='⏳ Извлечение статей...';
     const fd=new FormData();selectedFiles.forEach(f=>fd.append('files',f));
     try{
         const resp=await fetch('/process',{method:'POST',body:fd}),data=await resp.json();
@@ -358,18 +328,53 @@ async function processFiles(){
         currentResult=data;displayResults(data);pt.textContent='✅ Готово!';setTimeout(()=>p.style.display='none',2000)
     }catch(e){pt.textContent='❌ Ошибка';setTimeout(()=>p.style.display='none',3000)}
 }
+
 function displayResults(d){
-    document.getElementById('resultsSummary').innerHTML=`<strong>📊 Результаты</strong><br>Файлов: ${d.files_processed}<br>Чанков: ${d.total_chunks}<br>Элементов: ${d.total_elements}`;
+    document.getElementById('resultsSummary').innerHTML=`<strong>📊 Результаты</strong><br>Файлов: ${d.files_processed}<br>Статей: ${d.total_chunks}`;
     let h='';
-    for(const[fn,fd]of Object.entries(d.results||{})){h+='<h3>📄 '+fn+'</h3>';if(fd.chunks)fd.chunks.forEach(c=>{h+=`<div class="chunk"><div class="chunk-theme">#${c.id} ${esc(c.theme)}</div><div class="chunk-content">${esc(c.content)}</div><div class="chunk-elements">${(c.elements||[]).map(e=>`<span class="element-tag">${esc(e)}</span>`).join('')}</div></div>`})}
-    document.getElementById('tabChunks').innerHTML=h||'<p>Нет данных</p>';
+    for(const[fn,fd]of Object.entries(d.results||{})){
+        h+=`<h2 style="margin:20px 0 10px">📄 ${fn} (${fd.chunks.length} статей)</h2>`;
+        if(fd.chunks){
+            fd.chunks.forEach(c=>{
+                h+=`<div class="article-card"><div class="article-header">${c.id}. ${esc(c.theme)}</div><div class="article-body">${esc(c.content)}</div></div>`
+            })
+        }
+    }
+    document.getElementById('tabArticles').innerHTML=h||'<p>Нет данных</p>';
     document.getElementById('tabJson').innerHTML='<pre>'+esc(JSON.stringify(d,null,2))+'</pre>';
     document.getElementById('results').style.display='block'
 }
-function showTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab')[n==='chunks'?0:1].classList.add('active');document.getElementById(n==='chunks'?'tabChunks':'tabJson').classList.add('active')}
-function downloadJSON(){if(!currentResult)return;const b=new Blob([JSON.stringify(currentResult,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='chunks.json';a.click()}
-function downloadTXT(){if(!currentResult)return;let t='';for(const[fn,fd]of Object.entries(currentResult.results||{})){t+='Файл: '+fn+'\\n'+'='.repeat(50)+'\\n\\n';(fd.chunks||[]).forEach(c=>{t+=`ЧАНК ${c.id}\\nТема: ${c.theme}\\nТекст: ${c.content}\\nЭлементы: ${(c.elements||[]).join(', ')}\\n${'-'.repeat(30)}\\n`})}const b=new Blob([t],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='chunks.txt';a.click()}
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+function showTab(n){
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.tab')[n==='articles'?0:1].classList.add('active');
+    document.getElementById(n==='articles'?'tabArticles':'tabJson').classList.add('active')
+}
+
+function downloadJSON(){
+    if(!currentResult)return;
+    const b=new Blob([JSON.stringify(currentResult,null,2)],{type:'application/json'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='articles.json';a.click()
+}
+
+function downloadTXT(){
+    if(!currentResult)return;
+    let t='';
+    for(const[fn,fd]of Object.entries(currentResult.results||{})){
+        t+='ФАЙЛ: '+fn+'\\n'+'='.repeat(70)+'\\n\\n';
+        (fd.chunks||[]).forEach(c=>{
+            t+=`СТАТЬЯ ${c.id}: ${c.theme}\\n`+'-'.repeat(50)+'\\n';
+            t+=c.content+'\\n\\n'
+        })
+    }
+    const b=new Blob([t],{type:'text/plain;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='articles.txt';a.click()
+}
+
+function esc(s){
+    const d=document.createElement('div');d.textContent=s;return d.innerHTML
+}
 </script>
 </body>
 </html>'''
@@ -420,7 +425,7 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                     return
                 
                 results = {}
-                total_chunks = total_elements = 0
+                total_articles = 0
                 
                 for filename, file_content in files_data:
                     temp_path = TEMP_DIR / filename
@@ -429,6 +434,7 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                     
                     try:
                         ext = os.path.splitext(filename)[1].lower()
+                        
                         if ext == '.pdf':
                             text = extract_text_with_unstructured(str(temp_path))
                         elif ext in ['.txt', '.rtf']:
@@ -436,18 +442,24 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                         else:
                             continue
                         
-                        if text and len(text.strip()) > 50:
-                            chunks = process_text_to_chunks(text)
+                        if text:
+                            print(f"Поиск статей в: {filename}")
+                            articles = find_articles(text)
+                            print(f"  Найдено статей: {len(articles)}")
+                            
+                            chunks = []
+                            for i, article in enumerate(articles, 1):
+                                chunks.append({
+                                    'id': i,
+                                    'theme': article['title'],
+                                    'content': article['content']
+                                })
+                            
                             results[filename] = {
                                 'chunks': chunks,
-                                'total_chunks': len(chunks),
-                                'total_elements': sum(c['elements_count'] for c in chunks)
+                                'total_chunks': len(chunks)
                             }
-                            total_chunks += len(chunks)
-                            total_elements += sum(c['elements_count'] for c in chunks)
-                            
-                            # Сохраняем в Documents
-                            save_chunks_to_files(chunks, filename)
+                            total_articles += len(chunks)
                     finally:
                         if temp_path.exists():
                             temp_path.unlink()
@@ -455,11 +467,12 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                 self.send_json({
                     'files_received': len(files_data),
                     'files_processed': len(results),
-                    'total_chunks': total_chunks,
-                    'total_elements': total_elements,
+                    'total_chunks': total_articles,
                     'results': results
                 })
+                
             except Exception as e:
+                print(f"Ошибка: {e}")
                 self.send_json({'error': str(e)})
         else:
             self.send_error(404)
@@ -478,12 +491,9 @@ class ChunkerHandler(BaseHTTPRequestHandler):
 def main():
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("  ГАЗЕТНЫЙ ЧАНКЕР — ВЕБ-ИНТЕРФЕЙС")
+    print("  ГАЗЕТНЫЙ ЧАНКЕР — КРУПНЫЕ СТАТЬИ")
     print("=" * 60)
     print(f"  Сервер: http://0.0.0.0:{port}")
-    print(f"  Папка с газетами: {RAW_DIR}")
-    print(f"  Папка результатов: {OUTPUT_DIR}")
-    print("  Ctrl+C для остановки")
     print("=" * 60)
     
     server = HTTPServer(('0.0.0.0', port), ChunkerHandler)
