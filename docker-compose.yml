@@ -1,3 +1,4 @@
+# docker-compose.yml
 services:
   web-chunker:
     image: downloads.unstructured.io/unstructured-io/unstructured:latest
@@ -12,4 +13,4 @@ services:
     command: python web_chunker.py
     environment:
       - PORT=5000
-    restart: unless-stopped
+      - PYTHONUNBUFFERED=1

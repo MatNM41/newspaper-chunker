@@ -1,19 +1,29 @@
-﻿# Python
+﻿# .gitignore
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 
 # Данные
 raw/*
 Documents/*
+!raw/.gitkeep
+!Documents/.gitkeep
 
 # Docker
 .env
+docker-compose.override.yml
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Системные
 Thumbs.db
 .DS_Store
 *.log
+*.tmp
+*.temp

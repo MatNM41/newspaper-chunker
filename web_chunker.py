@@ -1,6 +1,8 @@
+# web_chunker.py
 import os
 import json
 import re
+import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
@@ -21,85 +23,112 @@ TEMP_DIR.mkdir(exist_ok=True)
 SUPPORTED_EXTENSIONS = {'.pdf', '.txt', '.rtf', '.doc', '.docx'}
 
 # =====================================================================
-# ИЗВЛЕЧЕНИЕ ТЕКСТА
+# ИЗВЛЕЧЕНИЕ ТЕКСТА (ТОЛЬКО UNSTRUCTURED)
 # =====================================================================
 
 def extract_text_with_unstructured(input_path):
-    """Извлекает ВЕСЬ текст через Unstructured"""
+    """Извлекает ВЕСЬ текст через Unstructured для всех форматов"""
     try:
         from unstructured.partition.auto import partition
         
-        print(f"Извлечение текста из: {os.path.basename(input_path)}")
-        elements = partition(filename=input_path, strategy="auto", languages=["rus"])
+        print(f"📄 Извлечение текста из: {os.path.basename(input_path)}")
+        elements = partition(
+            filename=str(input_path), 
+            strategy="auto", 
+            languages=["rus"]
+        )
         
         all_text = []
         for el in elements:
             text = str(el).strip()
-            if text:
+            if text and len(text) > 2:
                 all_text.append(text)
         
+        if not all_text:
+            print(f"⚠️ Текст не найден в {os.path.basename(input_path)}")
+            return None
+            
         full_text = '\n'.join(all_text)
         print(f"✓ Извлечено {len(full_text)} символов")
         return full_text
         
+    except ImportError as e:
+        print(f"❌ Unstructured не установлен: {e}")
+        return None
     except Exception as e:
-        print(f"Ошибка Unstructured: {e}")
+        print(f"❌ Ошибка Unstructured: {e}")
         return None
 
 
-def extract_text_txt(file_path):
-    """Читает текстовый файл"""
-    try:
-        with open(file_path, 'rb') as f:
-            raw = f.read()
-        for enc in ['utf-8', 'cp1251', 'cp866']:
-            try:
-                text = raw.decode(enc)
-                if text and len(text.strip()) > 10:
-                    return text
-            except:
-                continue
-    except Exception as e:
-        print(f"Ошибка чтения: {e}")
-    return None
-
+def extract_text(file_path):
+    """Универсальное извлечение текста через Unstructured"""
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext not in SUPPORTED_EXTENSIONS:
+        print(f"⚠️ Неподдерживаемый формат: {ext}")
+        return None
+    
+    # Используем Unstructured для всех форматов
+    return extract_text_with_unstructured(file_path)
 
 # =====================================================================
-# НОВЫЙ АЛГОРИТМ: ВЕСЬ ТЕКСТ, МИНИМУМ РАЗБИЕНИЙ
+# ОЧИСТКА ТЕКСТА (МИНИМАЛЬНАЯ, БЕЗ УДАЛЕНИЯ СМЫСЛА)
 # =====================================================================
 
 def clean_text(text):
-    """Минимальная очистка текста"""
-    # Удаляем номера страниц (одинокие цифры)
+    """
+    Минимальная очистка текста от лишних символов
+    Сохраняет смысл, удаляет только мусор
+    """
+    if not text:
+        return ""
+    
+    # Удаляем номера страниц (одинокие цифры на отдельных строках)
     text = re.sub(r'\n\s*\d{1,3}\s*\n', '\n', text)
     
-    # Склеиваем слова с переносами
+    # Склеиваем слова с переносами (дефис в конце строки)
     text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)
     
-    # Объединяем одиночные переносы строк внутри абзацев
-    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-    
-    # Убираем множественные пробелы
+    # Убираем множественные пробелы (оставляем по одному)
     text = re.sub(r'[ \t]+', ' ', text)
     
-    # Убираем слишком много пустых строк
+    # Убираем слишком много пустых строк (максимум 2 подряд)
     text = re.sub(r'\n{3,}', '\n\n', text)
     
-    return text.strip()
+    # Удаляем \r (возврат каретки) - только их, \n оставляем
+    text = text.replace('\r', '')
+    
+    # Удаляем управляющие символы (кроме \n и пробелов)
+    # Оставляем: буквы, цифры, пробелы, . , ! ? - ( ) « » " ' и переносы строк
+    text = re.sub(r'[^\w\s.,!?\-()«»""\']+', ' ', text, flags=re.UNICODE)
+    
+    # Убираем множественные пробелы после замены символов
+    text = re.sub(r' +', ' ', text)
+    
+    # Убираем пробелы в начале и конце строк
+    lines = [line.strip() for line in text.split('\n')]
+    text = '\n'.join(lines)
+    
+    # Убираем пробелы в начале и конце всего текста
+    text = text.strip()
+    
+    return text
 
+# =====================================================================
+# ОПРЕДЕЛЕНИЕ ЗАГОЛОВКОВ (УЛУЧШЕННОЕ)
+# =====================================================================
 
 def is_major_headline(line):
     """
-    Определяет ЯВНЫЙ заголовок статьи.
-    Очень строгие критерии — только явные заголовки.
+    Определяет заголовок статьи
     """
     line = line.strip()
     
-    if not line or len(line) < 10 or len(line) > 120:
+    if not line or len(line) < 10 or len(line) > 150:
         return False
     
-    # Не URL, не номер страницы
-    if re.match(r'^(www\.|http|\d+\s*$)', line):
+    # Не URL, не номер страницы, не дата
+    if re.match(r'^(www\.|http|\d{1,3}\s*$|\d{1,2}\.\d{1,2}\.\d{2,4})', line):
         return False
     
     # Должен начинаться с заглавной буквы
@@ -111,44 +140,54 @@ def is_major_headline(line):
     if len(words) < 2:
         return False
     
-    # ЯВНЫЕ признаки заголовка (нужно 2 или более):
-    signals = 0
+    # Система оценки заголовка (нужно 2+ балла)
+    score = 0
     
-    # 1. Весь текст ЗАГЛАВНЫМИ буквами (РУБРИКА)
+    # 1. ВСЕ ЗАГЛАВНЫЕ (РУБРИКА)
     if line.isupper():
-        signals += 3
+        score += 3
+        # Если все заглавные - это почти гарантированный заголовок
+        return True
     
-    # 2. Каждое слово с заглавной буквы (Title Case)
-    if all(w[0].isupper() for w in words):
-        signals += 2
+    # 2. Каждое слово с заглавной (Title Case)
+    if all(w[0].isupper() for w in words if len(w) > 1):
+        score += 2
     
-    # 3. Заканчивается двоеточием
-    if line.endswith(':'):
-        signals += 2
+    # 3. Заканчивается двоеточием или точкой
+    if line.endswith(':') or line.endswith('.'):
+        score += 1
     
-    # 4. Очень короткий (менее 40 символов)
-    if len(line) < 40:
-        signals += 1
+    # 4. Короткая строка (до 60 символов) - типично для заголовков
+    if len(line) < 60:
+        score += 1
     
-    # 5. Содержит числа в начале (как нумерация разделов)
+    # 5. Нумерация в начале
     if re.match(r'^\d+[\.\)]\s', line):
-        signals += 2
+        score += 2
     
-    # 6. Выделен кавычками
-    if line.startswith('«') and line.endswith('»'):
-        signals += 2
+    # 6. В кавычках
+    if (line.startswith('«') and line.endswith('»')) or \
+       (line.startswith('"') and line.endswith('"')):
+        score += 2
     
-    return signals >= 3
+    # 7. Содержит важные слова-маркеры
+    markers = ['Глава', 'Раздел', 'Часть', 'Статья', '§', 'Параграф']
+    if any(m in line for m in markers):
+        score += 2
+    
+    return score >= 3
 
 
 def find_articles(text):
     """
-    Разбивает текст на крупные статьи.
-    Берёт ВЕСЬ текст, разбивает только по ЯВНЫМ заголовкам.
+    Разбивает текст на статьи по заголовкам
     """
+    if not text or len(text) < 50:
+        return [{'title': 'Единственная статья', 'content': text or ''}]
+    
     lines = text.split('\n')
     
-    # Ищем ТОЛЬКО явные заголовки
+    # Находим все потенциальные заголовки
     headlines = []
     for i, line in enumerate(lines):
         if is_major_headline(line):
@@ -159,37 +198,53 @@ def find_articles(text):
     
     print(f"  Найдено заголовков: {len(headlines)}")
     
-    # Если заголовков нет или найден только 1 — весь текст одна статья
-    if len(headlines) <= 1:
+    # Если нет заголовков - весь текст одна статья
+    if len(headlines) == 0:
         cleaned = clean_text(text)
         title = cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in cleaned[:100] else cleaned[:100]
-        return [{'title': title, 'content': cleaned}]
+        return [{'title': title[:100], 'content': cleaned}]
     
-    # Оставляем заголовки, которые НЕ рядом друг с другом (минимум 5 строк между ними)
+    # Фильтруем слишком близкие заголовки (меньше 3 строк между ними)
     filtered = [headlines[0]]
     for h in headlines[1:]:
-        if h['index'] - filtered[-1]['index'] >= 5:
+        if h['index'] - filtered[-1]['index'] >= 3:
             filtered.append(h)
+        else:
+            # Если заголовки близко - объединяем их
+            filtered[-1]['title'] += ' ' + h['title']
     
     print(f"  После фильтрации: {len(filtered)} заголовков")
     
     # Формируем статьи
     articles = []
     
+    # Если есть текст до первого заголовка
+    if filtered[0]['index'] > 0:
+        pre_lines = []
+        for j in range(0, filtered[0]['index']):
+            line = lines[j].strip()
+            if line and len(line) > 5:
+                pre_lines.append(line)
+        pre_text = '\n'.join(pre_lines)
+        pre_cleaned = clean_text(pre_text)
+        if len(pre_cleaned) > 50:
+            title = pre_cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in pre_cleaned[:100] else pre_cleaned[:100]
+            articles.append({'title': title[:100], 'content': pre_cleaned})
+    
+    # Основные статьи
     for i, headline in enumerate(filtered):
         start = headline['index']
         
-        # Конец статьи — следующий заголовок или конец текста
         if i + 1 < len(filtered):
             end = filtered[i + 1]['index']
         else:
             end = len(lines)
         
-        # Собираем ВСЕ строки статьи
+        # Собираем строки статьи
         article_lines = []
         for j in range(start, end):
             line = lines[j].strip()
-            if line:  # Берём все непустые строки
+            if line:
                 article_lines.append(line)
         
         article_text = '\n'.join(article_lines)
@@ -197,28 +252,120 @@ def find_articles(text):
         
         if len(cleaned) > 50:
             articles.append({
-                'title': headline['title'],
+                'title': headline['title'][:100],
                 'content': cleaned
             })
     
-    # Если остался текст до первого заголовка — добавляем
-    if filtered and filtered[0]['index'] > 0:
-        pre_lines = []
-        for j in range(0, filtered[0]['index']):
-            line = lines[j].strip()
-            if line:
-                pre_lines.append(line)
-        pre_text = '\n'.join(pre_lines)
-        pre_cleaned = clean_text(pre_text)
-        if len(pre_cleaned) > 50:
-            title = pre_cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in pre_cleaned[:100] else pre_cleaned[:100]
-            articles.insert(0, {'title': title, 'content': pre_cleaned})
+    # Если статей всё ещё нет - возвращаем весь текст как одну статью
+    if not articles:
+        cleaned = clean_text(text)
+        title = cleaned[:100].rsplit('.', 1)[0] + '.' if '.' in cleaned[:100] else cleaned[:100]
+        return [{'title': title[:100], 'content': cleaned}]
     
     return articles
 
+# =====================================================================
+# СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+# =====================================================================
+
+def save_results(results, output_dir):
+    """Сохраняет результаты в JSON и TXT форматах"""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Сохраняем JSON
+    json_file = output_dir / f'articles_{timestamp}.json'
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print(f"💾 JSON сохранён: {json_file}")
+    
+    # Сохраняем TXT
+    txt_file = output_dir / f'articles_{timestamp}.txt'
+    with open(txt_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("ГАЗЕТНЫЙ ЧАНКЕР - РЕЗУЛЬТАТЫ\n")
+        f.write(f"Дата обработки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 80 + "\n\n")
+        
+        for filename, data in results.get('results', {}).items():
+            f.write(f"📄 ФАЙЛ: {filename}\n")
+            f.write("-" * 60 + "\n")
+            f.write(f"Всего статей: {data.get('total_chunks', 0)}\n\n")
+            
+            for chunk in data.get('chunks', []):
+                f.write(f"СТАТЬЯ {chunk.get('id', '?')}: {chunk.get('theme', 'Без названия')}\n")
+                f.write("-" * 50 + "\n")
+                f.write(chunk.get('content', '') + "\n\n")
+            f.write("\n")
+    
+    print(f"💾 TXT сохранён: {txt_file}")
+    
+    return json_file, txt_file
+
+
+def process_file(file_path):
+    """Обрабатывает один файл"""
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext not in SUPPORTED_EXTENSIONS:
+        print(f"⚠️ Неподдерживаемый формат: {file_path}")
+        return None
+    
+    # Извлекаем текст через Unstructured
+    text = extract_text(file_path)
+    if not text:
+        return None
+    
+    # Находим статьи
+    articles = find_articles(text)
+    print(f"  Найдено статей: {len(articles)}")
+    
+    if not articles:
+        return None
+    
+    # Формируем результат
+    chunks = []
+    for i, article in enumerate(articles, 1):
+        chunks.append({
+            'id': i,
+            'theme': article['title'],
+            'content': article['content']
+        })
+    
+    return {
+        'chunks': chunks,
+        'total_chunks': len(chunks)
+    }
+
+
+def process_batch(files, output_dir=OUTPUT_DIR):
+    """Обрабатывает пачку файлов"""
+    results = {
+        'processed_at': datetime.now().isoformat(),
+        'files_processed': 0,
+        'total_chunks': 0,
+        'results': {}
+    }
+    
+    for file_path in files:
+        filename = os.path.basename(file_path)
+        print(f"\n📄 Обработка: {filename}")
+        
+        result = process_file(file_path)
+        if result:
+            results['results'][filename] = result
+            results['files_processed'] += 1
+            results['total_chunks'] += result['total_chunks']
+        else:
+            print(f"❌ Не удалось обработать {filename}")
+    
+    # Сохраняем результаты
+    if results['files_processed'] > 0:
+        save_results(results, output_dir)
+    
+    return results
 
 # =====================================================================
-# HTML ИНТЕРФЕЙС
+# HTML ИНТЕРФЕЙС (СОХРАНЁН БЕЗ ИЗМЕНЕНИЙ)
 # =====================================================================
 
 def get_html():
@@ -261,8 +408,8 @@ def get_html():
     
     <div class="upload-area" id="dropZone">
         <p>📁 Перетащите файлы или кликните для выбора</p>
-        <p style="color:#999;font-size:14px">PDF, TXT, RTF</p>
-        <input type="file" id="fileInput" multiple accept=".pdf,.txt,.rtf">
+        <p style="color:#999;font-size:14px">PDF, TXT, RTF, DOC, DOCX</p>
+        <input type="file" id="fileInput" multiple accept=".pdf,.txt,.rtf,.doc,.docx">
     </div>
     
     <div id="fileList"></div>
@@ -300,7 +447,7 @@ fi.addEventListener('change',e=>{addFiles(e.target.files)});
 function addFiles(nf){
     for(let f of nf){
         const e=f.name.split('.').pop().toLowerCase();
-        if(['pdf','txt','rtf'].includes(e)&&!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
+        if(['pdf','txt','rtf','doc','docx'].includes(e)&&!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
             selectedFiles.push(f)
     }
     updateFileList()
@@ -379,7 +526,6 @@ function esc(s){
 </body>
 </html>'''
 
-
 # =====================================================================
 # HTTP СЕРВЕР
 # =====================================================================
@@ -424,55 +570,28 @@ class ChunkerHandler(BaseHTTPRequestHandler):
                     self.send_json({'error': 'Файлы не найдены'})
                     return
                 
-                results = {}
-                total_articles = 0
-                
+                # Сохраняем и обрабатываем файлы
+                temp_files = []
                 for filename, file_content in files_data:
                     temp_path = TEMP_DIR / filename
                     with open(temp_path, 'wb') as f:
                         f.write(file_content)
-                    
-                    try:
-                        ext = os.path.splitext(filename)[1].lower()
-                        
-                        if ext == '.pdf':
-                            text = extract_text_with_unstructured(str(temp_path))
-                        elif ext in ['.txt', '.rtf']:
-                            text = extract_text_txt(str(temp_path))
-                        else:
-                            continue
-                        
-                        if text:
-                            print(f"Поиск статей в: {filename}")
-                            articles = find_articles(text)
-                            print(f"  Найдено статей: {len(articles)}")
-                            
-                            chunks = []
-                            for i, article in enumerate(articles, 1):
-                                chunks.append({
-                                    'id': i,
-                                    'theme': article['title'],
-                                    'content': article['content']
-                                })
-                            
-                            results[filename] = {
-                                'chunks': chunks,
-                                'total_chunks': len(chunks)
-                            }
-                            total_articles += len(chunks)
-                    finally:
-                        if temp_path.exists():
-                            temp_path.unlink()
+                    temp_files.append(temp_path)
                 
-                self.send_json({
-                    'files_received': len(files_data),
-                    'files_processed': len(results),
-                    'total_chunks': total_articles,
-                    'results': results
-                })
+                # Обрабатываем
+                results = process_batch(temp_files, OUTPUT_DIR)
+                
+                # Удаляем временные файлы
+                for f in temp_files:
+                    if f.exists():
+                        f.unlink()
+                
+                self.send_json(results)
                 
             except Exception as e:
-                print(f"Ошибка: {e}")
+                print(f"❌ Ошибка: {e}")
+                import traceback
+                traceback.print_exc()
                 self.send_json({'error': str(e)})
         else:
             self.send_error(404)
@@ -488,19 +607,26 @@ class ChunkerHandler(BaseHTTPRequestHandler):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}")
 
 
+# =====================================================================
+# ЗАПУСК
+# =====================================================================
+
 def main():
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("  ГАЗЕТНЫЙ ЧАНКЕР — КРУПНЫЕ СТАТЬИ")
+    print("  ГАЗЕТНЫЙ ЧАНКЕР — ВЕБ-ИНТЕРФЕЙС")
     print("=" * 60)
     print(f"  Сервер: http://0.0.0.0:{port}")
+    print("  Нажмите Ctrl+C для остановки")
+    print("=" * 60)
+    print("  Поддерживаемые форматы: PDF, TXT, RTF, DOC, DOCX")
     print("=" * 60)
     
     server = HTTPServer(('0.0.0.0', port), ChunkerHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nСервер остановлен")
+        print("\n⏹️ Сервер остановлен")
         server.server_close()
 
 
